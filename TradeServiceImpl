@@ -1,0 +1,414 @@
+package com.citi.gtb.service;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import org.apache.log4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.DependsOn;
+import org.springframework.stereotype.Service;
+import com.citi.gtb.beans.Filter;
+import com.citi.gtb.beans.Trade;
+import com.citi.gtb.beans.TradeAllClients;
+import com.citi.gtb.beans.TradeCount;
+import com.citi.gtb.cache.service.CacheService;
+import com.citi.gtb.dao.FITradesDAO;
+import com.citi.gtb.dao.TradeDAO;
+import com.citi.gtb.utils.SortOrderComparator;
+
+@Service("TradeServiceImpl")
+@DependsOn({"TradeDAOFactory","FITradesDAOImpl","CacheService"})
+public class TradeServiceImpl implements TradeService {
+
+	private Logger logger = Logger.getLogger(TradeServiceImpl.class);
+	
+	@Autowired
+	private TradeDAOFactory tradeFactory;
+	
+	@Autowired
+	private CacheService cacheService;
+	
+	@Autowired
+	@Qualifier("FITradesDAOImpl")
+	private FITradesDAO fiTradesDAO;
+
+	@Value("${CALL_GTU}")
+	private String CALL_GTU;
+	
+	@SuppressWarnings("unused")
+	@Override
+	public List<Trade> getTrades(List<Filter> filterList) throws Exception  {
+		
+		final Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+		
+		if(cacheService.isEnableGTPTradesCache()){
+			
+			String fromDate = (String)filterMap.get("fromDate");
+			String toDate = (String)filterMap.get("toDate");
+			
+			boolean isInDateRange = false;
+			
+			isInDateRange = cacheService.isInDataRange(fromDate,toDate);
+			
+			String category  = (String)filterMap.get("category");
+			
+			boolean  isSupportedCategory = cacheService.getSupportedTradeCategory(category);
+			
+			if(isInDateRange && isSupportedCategory){
+				
+				if(logger.isInfoEnabled())
+				   logger.info("::::::::::: Load Trades from Cache :::::::::::");
+				
+				List<Trade> trades = cacheService.getTrades(filterList);
+				
+				return trades;
+			}
+		}
+		
+		if(logger.isInfoEnabled())
+		   logger.info("::::::::::: Load Trades from DateBase :::::::::::");
+		
+		List<Trade> masterTradeList = getTradesFromDb(filterList);
+		
+		return masterTradeList;
+	}
+	
+	@Override
+	public List<Trade> getTradeDetails(List<Filter> filterList) {
+		Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+		
+		 return this.getTradeDetails(filterMap);
+	}
+
+	@Override
+	public List<Trade> getTradeDetails(Map<String, Object> filterMap) {
+		List<Trade> optimusTradesList = new ArrayList<Trade>();
+		List<Trade> gtuTradesList = new ArrayList<Trade>();
+		List<Trade> masterTradeList = new ArrayList<Trade>();
+		String assetType = (String) filterMap.get("assetType");
+		if (assetType.indexOf("IPB") != -1 || assetType.indexOf("ALL") != -1) {
+			gtuTradesList = (List<Trade>) tradeFactory.getInstance("GTU").generateTradeExcelData(filterMap);
+		}
+
+		if (assetType.indexOf("FI") != -1 || assetType.indexOf("Equity") != -1 || assetType.indexOf("ALL") != -1) {
+			optimusTradesList = (List<Trade>) tradeFactory.getInstance("Optimus").generateTradeExcelData(filterMap);
+		}
+		masterTradeList.addAll(optimusTradesList);
+		masterTradeList.addAll(gtuTradesList);
+		/*
+		 * int pageNo = 1; try { pageNo = Integer.parseInt((String)
+		 * filterMap.get("pageNo")); } catch (NumberFormatException e) { pageNo
+		 * = 1; } int totalTradesPerPage = 1; try { totalTradesPerPage =
+		 * Integer.parseInt((String) filterMap.get("totalTradesPerPage")); }
+		 * catch (NumberFormatException e) { totalTradesPerPage = 1; }
+		 * List<Trade> optimusTradesList = (List<Trade>)
+		 * tradeDAO.generateTradeExcelData(filterMap);
+		 * 
+		 * if (optimusTradesList != null) { int start = totalTradesPerPage *
+		 * (pageNo - 1); if (start > optimusTradesList.size()) { start = 0; }
+		 * int end = start + totalTradesPerPage; if (end >
+		 * optimusTradesList.size()) { int end = start + totalTradesPerPage; if
+		 * (end > masterTradeList.size()) { end = masterTradeList.size(); }
+		 * masterTradeList = (List<Trade>) masterTradeList.subList(start, end);
+		 * } else { masterTradeList = new ArrayList<Trade>(); //
+		 * optimusTradesList.add(new Trade()); }
+		 * 
+		 * return masterTradeList; }
+		 * 
+		 * }
+		 */
+		return masterTradeList;
+	}
+	@Override
+	public List<Trade> getBlockDetails(List<Filter> filterList){
+		
+		Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+
+		List<Trade> optimusTradesList = new ArrayList<Trade>();
+		List<Trade> gtuTradesList = new ArrayList<Trade>();
+		List<Trade> masterTradeList = new ArrayList<Trade>();
+		String assetType = (String) filterMap.get("assetType");
+		if (assetType.indexOf("IPB") != -1 || assetType.indexOf("ALL") != -1) {
+			gtuTradesList = (List<Trade>) tradeFactory.getInstance("GTU").getBlockDetails(filterMap);
+		}
+
+		if (assetType.indexOf("FI") != -1 || assetType.indexOf("Equity") != -1 || assetType.indexOf("ALL") != -1) {
+			optimusTradesList = (List<Trade>) tradeFactory.getInstance("Optimus").getBlockDetails(filterMap);
+		}
+		masterTradeList.addAll(optimusTradesList);
+		masterTradeList.addAll(gtuTradesList);
+		return masterTradeList;
+	
+	}
+
+	@Override
+	public List<TradeAllClients> getAllClients(String userId) {
+
+		return (List<TradeAllClients>) tradeFactory.getInstance("Optimus").getAllClients(userId);
+	}
+
+	@Override
+	public TradeCount getTradeCount(List<Filter> filterList) {
+
+		Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+		String assetType = (String) filterMap.get("assetType");
+		TradeCount tradeCount = new TradeCount();
+		TradeCount optimusTradesCount = new TradeCount();
+		TradeCount gtuTradesCount = new TradeCount();
+
+		if (assetType.indexOf("FI") != -1 || assetType.indexOf("Equity") != -1 || assetType.indexOf("ALL") != -1) {
+			optimusTradesCount = (TradeCount) tradeFactory.getInstance("Optimus").getTradeCount(filterMap);
+		}
+		if (assetType.indexOf("IPB") != -1 || assetType.indexOf("ALL") != -1) {
+			gtuTradesCount = (TradeCount) tradeFactory.getInstance("GTU").getTradeCount(filterMap);
+		}
+
+		tradeCount.setTradeApprovalsCount(
+				optimusTradesCount.getTradeApprovalsCount() + gtuTradesCount.getTradeApprovalsCount());
+		tradeCount.setTransferExceptionCount(
+				optimusTradesCount.getTransferExceptionCount() + gtuTradesCount.getTransferExceptionCount());
+		tradeCount.setTransferApprovalsCount(
+				optimusTradesCount.getTransferApprovalsCount() + gtuTradesCount.getTransferApprovalsCount());
+		tradeCount.setTradeExceptionCount(
+				optimusTradesCount.getTradeExceptionCount() + gtuTradesCount.getTradeExceptionCount());
+		tradeCount.setTradeOthersCount(optimusTradesCount.getTradeOthersCount() + gtuTradesCount.getTradeOthersCount());
+		tradeCount.setTradeProcessedCount(
+				optimusTradesCount.getTradeProcessedCount() + gtuTradesCount.getTradeProcessedCount());
+		tradeCount.setTradeAllCount(optimusTradesCount.getTradeAllCount() + gtuTradesCount.getTradeAllCount());
+		tradeCount.setTransferProcessedCount(
+				optimusTradesCount.getTransferProcessedCount() + gtuTradesCount.getTransferProcessedCount());
+		tradeCount.setTransferOthersCount(
+				optimusTradesCount.getTransferOthersCount() + gtuTradesCount.getTransferOthersCount());
+		tradeCount.setTransferAllCount(optimusTradesCount.getTransferAllCount() + gtuTradesCount.getTransferAllCount());
+		if ("Y".equals(CALL_GTU)) {
+			tradeCount.setNextPollingInterval(gtuTradesCount.getNextPollingInterval());
+		} else {
+			tradeCount.setNextPollingInterval(optimusTradesCount.getNextPollingInterval());
+		}
+		tradeCount.setLastPollingTime(optimusTradesCount.getLastPollingTime());
+		return tradeCount;
+	}
+
+	@Override
+	public List<Trade> getAllocations(List<Filter> filterList) {
+		Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+		String blockId = (String) filterMap.get("blockId");
+		String source = (String) filterMap.get("source");
+		String blockIdArray[] = blockId.split(",");
+		String sourceArray[] = source.split(",");
+		StringBuffer sbOptimus = new StringBuffer();
+		StringBuffer sbgtu = new StringBuffer();
+		List<Trade> masterTradeList = new ArrayList<Trade>();
+		List<Trade> optimusTradelist = new ArrayList<Trade>();
+		List<Trade> gtuTradelist = new ArrayList<Trade>();
+
+		HashMap<String, String> map = new HashMap<String, String>();
+		for (int i = 0; i < sourceArray.length; i++) {
+			if (sourceArray[i].equalsIgnoreCase("Optimus")) {
+				sbOptimus.append(blockIdArray[i]).append(",");
+				map.put("Optimus", "Optimus");
+			} else {
+				sbgtu.append(blockIdArray[i]).append(",");
+				map.put("GTU", "GTU");
+			}
+
+		}
+		String str2 = sbOptimus.toString();
+		String optimusBlockIds = str2.replaceAll(",$", "");
+
+		String str1 = sbgtu.toString();
+		String gtuBlockIds = str1.replaceAll(",$", "");
+
+		if (map.get("Optimus") == "Optimus") {
+			filterMap.put("blockId", optimusBlockIds);
+			optimusTradelist = tradeFactory.getInstance("Optimus").getAllocations(filterMap);
+
+		}
+		if (map.get("GTU") == "GTU") {
+			filterMap.put("blockId", gtuBlockIds);
+			gtuTradelist = tradeFactory.getInstance("GTU").getAllocations(filterMap);
+		}
+		masterTradeList.addAll(optimusTradelist);
+		masterTradeList.addAll(gtuTradelist);
+
+		/*
+		 * for (int i = 0; i < idList.size(); i++) { for (int j = 0; j <
+		 * masterTradeList.size(); j++) { String str5 =
+		 * String.valueOf(masterTradeList.get(j).getBlockId());
+		 * if(str5.equals(idList.get(i))){
+		 * returnTradeList.add(masterTradeList.get(j)); } } }
+		 */
+		return masterTradeList;
+	}
+	
+	@Override
+	public List<String> validateClientRefId(Map<String,Object> filterMap){
+		String source = filterMap.get("source") == null ? null : filterMap.get("source").toString();
+		TradeDAO tradeDAO = tradeFactory.getInstance(source);
+		return tradeDAO.getClientRefId(filterMap);
+	}
+
+	@Override
+	public List<Trade> getTradesFromDb(List<Filter> filterList) {
+		final Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+		int pageNo = 1;
+		try {
+			pageNo = Integer.parseInt((String) filterMap.get("pageNo"));
+		} catch (NumberFormatException e) {
+			pageNo = 1;
+		}
+		int totalTradesPerPage = 1;
+		try {
+			totalTradesPerPage = Integer.parseInt((String) filterMap.get("totalTradesPerPage"));
+		} catch (NumberFormatException e) {
+			totalTradesPerPage = 1;
+		}
+		String assetType = (String) filterMap.get("assetType");
+		List<Trade> optimusTradesList = new ArrayList<Trade>();
+		List<Trade> gtuTradesList = new ArrayList<Trade>();
+		List<Trade> masterTradeList = new ArrayList<Trade>();
+		List<Trade> fiTradeList = new ArrayList<Trade>();
+		Future<List<Trade>> optimusFuture = null;
+		Future<List<Trade>> gtuFuture = null;
+		Future<List<Trade>> fiFuture = null;
+		
+		if (assetType.indexOf("Equity") != -1 || assetType.indexOf("ALL") != -1) {
+			ExecutorService executor = Executors.newFixedThreadPool(2);
+			optimusFuture = executor.submit(new Callable<List<Trade>>() {
+
+				@Override
+				public List<Trade> call() throws Exception {
+					 return tradeFactory.getInstance("Optimus").getTrades(filterMap);
+				}
+			});
+			executor.shutdown();
+		}
+		
+		
+		if (assetType.indexOf("IPB") != -1 || assetType.indexOf("ALL") != -1) {
+			ExecutorService executor = Executors.newFixedThreadPool(2);
+			gtuFuture = executor.submit(new Callable<List<Trade>>() {
+
+				@Override
+				public List<Trade> call() throws Exception {
+					 return tradeFactory.getInstance("GTU").getTrades(filterMap);
+				}
+			});
+			executor.shutdown();			
+		}
+
+
+		if (assetType.indexOf("FI") != -1  || assetType.indexOf("ALL") != -1) {
+			ExecutorService executor = Executors.newFixedThreadPool(2);
+			fiFuture = executor.submit(new Callable<List<Trade>>() {
+
+				@Override
+				public List<Trade> call() throws Exception {
+					 return fiTradesDAO.getTrades(filterMap);
+				}
+			});
+			executor.shutdown();
+			
+		}
+		try {
+			if (optimusFuture != null) {
+				optimusTradesList = optimusFuture.get();
+			}
+		
+		} catch (InterruptedException | ExecutionException e) {
+			logger.error("Error while fetching equity trades", e);
+		}
+		try {			
+			if (gtuFuture != null) {
+				gtuTradesList = gtuFuture.get();
+			}
+
+		} catch (InterruptedException | ExecutionException e) {
+			logger.error("Error while fetching GTU trades", e);
+		}
+		
+		try {			
+			if (fiFuture != null) {
+				fiTradeList = fiFuture.get();
+			}
+
+		} catch (InterruptedException | ExecutionException e) {
+			logger.error("Error while fetching fi trades", e);
+		}
+		
+		
+		masterTradeList.addAll(optimusTradesList);
+		masterTradeList.addAll(gtuTradesList);
+		masterTradeList.addAll(fiTradeList);
+		
+	 
+		String sortOrder = (String) filterMap.get("sortOrder");
+		String sortDirection = (String) filterMap.get("sortDirection");
+		Collections.sort(masterTradeList, new SortOrderComparator(sortDirection, sortOrder));
+
+		if (masterTradeList != null) {
+			int start = totalTradesPerPage * (pageNo - 1);
+			if (start > masterTradeList.size()) {
+				start = 0;
+			}
+			int end = start + totalTradesPerPage;
+			if (end > masterTradeList.size()) {
+				end = masterTradeList.size();
+			}
+			masterTradeList = (List<Trade>) masterTradeList.subList(start, end);
+		} else {
+			masterTradeList = new ArrayList<Trade>();
+		}
+		
+		return masterTradeList;
+
+	}
+
+	//used by cache
+	@Override
+	public List<Long> getBlockIdsByString(String condition, String db) {
+		return tradeFactory.getInstance(db).getBlockIdsByCondition(condition);
+	}
+	
+	@Override
+	public List<Trade> getFISplitTrades(List<Filter> filterList) {
+		
+		List<Trade> optimusTradesList = new ArrayList<Trade>();
+		Map<String, Object> filterMap = new LinkedHashMap<String, Object>();
+		for (Filter f : filterList) {
+			filterMap.put(f.getFilterName(), f.getFilterValues());
+		}
+		optimusTradesList = (List<Trade>) tradeFactory.getInstance("Optimus").getFISplitTrades(filterMap);
+		return optimusTradesList;
+	}
+	
+}
