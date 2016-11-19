@@ -1,0 +1,532 @@
+ CREATE PROCEDURE dbo.gettradestemp
+  @category            VARCHAR(25),
+  @assetType           VARCHAR(25) ,
+  @settlementCurrency  VARCHAR(25) ,
+  @fromDate            VARCHAR(50) ,
+  @toDate              VARCHAR(50) ,
+  @searchText          VARCHAR(100) ,
+  @top account         varchar(100) ,
+  @sortOrder           varchar(50) ,
+  @sortDirection       varchar(5) ,
+  @pageNo              int ,
+  @totalTradesPerPage  int ,
+  @userRole            varchar(20),
+  @showMyApprovalsOnly varchar(5)
+AS
+  DECLARE @topRowCount        int
+  DECLARE @startTrade         date int
+  DECLARE @toTradeDate        int
+  DECLARE @searchTextStr      varchar(100)
+  DECLARE @isSearchTextNumber int
+  DECLARE @searchTextInt      int
+  DECLARE @uid                varchar(36)
+  DECLARE @tempMsgState       varchar(20)
+  DECLARE @tempMsgStateUid    varchar(36 )
+  DECLARE @totalRecords       int
+  DECLARE @pTempAccountUid    varchar(36)
+  DECLARE @tempStatusUid      varchar(36)
+  DECLARE @userRoleUid        varchar(36)
+  DECLARE @cusip              char(12),
+    @isin                     char(12),
+    @sedol                    char(12)
+  SELECT @category = upper(@category)
+  SET @totalRecords = (@pageNo)*@totalTradesPerPage
+  CREATE TABLE #splittable
+               (
+                            uid   varchar(36),
+                            pos   int,
+                            value varchar(64)
+               )
+  EXEC dbo.gettablefromstring_fn_sy
+    @topAccount,
+    ',',
+    NULL,
+    @uid = @uid output
+  SET @pTempAccountUid = @uid
+  EXEC dbo.gettablefromstring_fn_sy
+    @userRole,
+    ',',
+    NULL,
+    @uid = @uid output
+  SET @userRoleUid = @uid
+  SELECT @searchTextStr = upper('%'+@searchText+'%')
+  SET @isSearchTextNumber = isnumeric(@searchText)
+  IF @isSearch textnumber = 1
+  SET @searchTextInt = cast(@searchText AS int)
+  ELSE
+  SET @searchTextInt = -99999
+  SELECT @startTradeDate = CONVERT(int,str_replace(substring(@fromDate,1,10),'-',NULL) ,121)
+  SELECT @toTradeDate = CONVERT (  int,str_replace(substring(@toDate,1,10),'-',NULL) ,121)
+  SELECT @fromDate = CONVERT(      datetime,@fromDate)
+  SELECT @toDate = dateadd(dd,1,CONVERT(datetime,@toDate))
+  IF @searchText!=''
+  BEGIN
+    SELECT @searchText = @searchText
+                  ||'%'
+    --Considering sedol/isin/cusip from GTU_TblSecmast table
+    SELECT @cusip=isnull(cusip,''),
+           @isin=isnull(isin,''),
+           @sedol=isnull(sedol,'')
+    FROM   gtu_tblsecmast
+    WHERE  upper(cusip) LIKE @searchTextStr
+    IF (isnull(@cusip,'')=''
+    AND
+    isn ull(@isin,'')=''
+    AND
+    isnull(@sedol,'')='')
+    SELECT @cusip=isnull(cusip,''),
+           @isin=isnull(isin,''),
+           @sedol=isnull(sedol,'')
+    FROM   gtu_tblsecmast
+    WHERE  upper(isin) LIKE @searchTextStr
+    IF (isnull(@cusip,'')=''
+    AND
+    isnull(@isin,'')=''
+    AND
+    isnull(@sedol,'')='')
+    SELECT @cusip=isnull(cusip,''),
+           @isin=isnull(isin,''),
+           @sedol=isnull(sedol,'')
+    FROM   gtu_tblsecmast
+    WHERE  upper(sedol) LIKE str_replace(@searchTextStr,'SEDOL',NULL)
+  END
+  --select @startTradeDate,@toTradeDate
+  ,@fromDate,@toDate
+  SELECT DISTINCT blockid
+  INTO            #alloc
+  FROM            pbprebook.dbo.tbltrade t3 noholdlock
+  WHERE           ( (
+                                                  t3.tradedate>=@startTradeDate
+                                  AND             t3.tradedate <= @toTradeDate)
+                  OR              (
+                                                  t3.moddt>=@fromDate
+                                  AND             t3.moddt<=@toDate) )
+  AND             (
+                                  @topAccount = 'ALL'
+                  OR              t3.topacct IN (sele ct value FROM #splittable noholdlock WHERE uid=@pTempAccountUid) )
+  AND             (
+                                  @settlementCurrency = 'ALL'
+                  OR              (
+                                                  @settlementCurrency='USD'
+                                  AND             t3.currcode='USD')
+                  OR              (
+                                                  @settlementCurrency='NON-USD'
+                                  AND             t3.currcode<>'USD'))
+  AND             (
+                                  @showMyApprovalsOnly='false'
+                  OR              EXISTS
+                                  (
+                                         SELECT 1
+                                         FROM   tbltradeapprovalstatus noholdlock
+                                         WHERE  blockid = t3.blockid
+                                         AND    trdappassignedto IN
+                                                (
+                                                       SELECT value
+                                                       FROM   #splittable
+                                                       WHERE  uid = @userRoleUid)) )
+  AND             t3.type IN ('AAL',
+                              'OAL')
+  AND             t3.buysell NOT IN ('DVP',
+                                     'RVP',
+                                     'TFI',
+                                     'TFO')
+  AND             t3.active = 'A'
+  AND             (
+                                  @searchText= ''
+                  OR              upper(t3.topacct) LIKE @searchTextStr
+                  OR              t3.blockid = @searchTextInt
+                  OR              upper(t3.clienttraderef) LIKE @searchTextStr
+                  OR              upper(t3.secid) LIKE @cusip
+                  OR              upper(t3.secid) LIKE @isin
+                  OR              str_replace(upper(t3.s ecid),'SEDOL',NULL) LIKE @sedol
+                  OR              upper(t3.secid) LIKE @searchTextStr
+                  OR              upper(t3.cusip) LIKE @searchTextStr
+                  OR              upper(t3.exbroker) LIKE @searchTextStr
+                  OR              upper(t3.clrbroker) LIKE @searchTextStr
+                  OR              t3.quantity = @searchTextInt
+                  OR              t3.price = @searchTextInt
+                  OR              upper(t3.subacct) LIKE @searchTextStr )
+  SELECT t.blockid,
+         t.tradeid,
+         t.tradever,
+         msgstate,
+         t.type,
+         (
+                SELECT dbo.f_geterrormessages_multialloc(t.blockid,'|','IPB')) AS errormessage, (
+         CASE
+                WHEN (
+                              t.state='P'
+                       AND    msgstate IN ('E',
+                                           'X')) THEN 'BACKOFFICE FAILED'
+                WHEN (
+                              t.state='P'
+                       AND    msgstate='S') THEN 'PENDING BACKO FFICE ACK'
+                WHEN (
+                              msgstate ='W') THEN 'WARNING'
+                WHEN (
+                              msgstate ='C') THEN 'PROCESSED'
+                WHEN (
+                              t.state='U') THEN 'ERROR'
+                WHEN (
+                              t.status='B') THEN 'BYPASSED'
+                WHEN (
+                              t.state='A'
+                       AND    t.status NOT IN ('D',
+                                               'B')) THEN 'PENDING APPROVAL'
+                ELSE''
+         END) AS stat
+  INTO   #inter
+  FROM   #alloc a,
+         tbltrade t,
+         tblipbmsg ipb
+  WHERE  t.blockid=a.blockid
+  AND    t.type IN ('OAL')
+  AND    t.active='A'
+  AND    t.tradeid=ipb.tradeid
+  AND    t.tradever=ipb.tradever
+  AND    ( (
+                       t.tradedate>=@startTradeDate
+                AND    t.tradedate <= @toTra dedate)
+         OR     (
+                       t.moddt>=@fromDate
+                AND    t.moddt<=@toDate)
+         OR     (
+                       ipb.moddt>=@fromDate
+                AND    ipb.moddt<=@toDate) )
+  AND    (
+                @category='EXCEPTIONS'
+         AND    ( (
+                              t.state='U'
+                       OR     (
+                                     t.state ='P'
+                              AND    ipb.msgstate IN ('E',
+                                                      'W',
+                                                      'X')))
+                OR     ( (
+                                     t.fileid<0
+                              OR     (
+                                            t.fileid > 0
+                                     AND    datediff(minute,t.moddt,getdate())>10))
+                       AND    (
+                                     ipb.msgstate IN ('S')) ) )
+         OR     (
+                       @category = 'PROCESSED'
+                AND    t.status IN ('A',
+                                    'M',
+                                    'X')
+                AND    ipb.msgstate = 'C' )
+                --or (@category = 'APPROVALS' and (t.state
+                = 'A'
+         AND    t.status NOT IN ('D',
+                                 'B')) )
+OR
+(
+  @category = 'OTHER'
+  AND
+  t.status = 'B'
+  AND
+  ipb.msgstate = 'B'
+)
+OR
+(
+  @category = 'ALL'
+  AND
+  (
+    (
+      (
+        t.state='U'
+        OR
+        (
+          t.state ='P'
+          AND
+          ipb.msgstate IN ('E',
+                           'W',
+                           'X')
+        )
+      )
+      OR
+      (
+        (
+          t.fileid<0
+          OR
+          (
+            t.fileid > 0
+            AND
+            datediff(minute,t.moddt,getdate ())>10
+          )
+        )
+        AND
+        ipb.msgstate IN ('S')
+      )
+      OR
+      (
+        t.status IN ('A',
+                     'M',
+                     'X')
+        AND
+        (
+          ipb.msgstate = 'C'
+        )
+      )
+      OR
+      (
+        t.status = 'B'
+        AND
+        (
+          ipb.msgstate = 'B'
+        )
+      )
+    )
+  )
+)
+)
+UNION
+SELECT t.blockid,
+       t.tradeid,
+       t.tradever,
+       msgstate,
+       t.type,
+       (
+              SELECT dbo.f_geterrormessages_multialloc( t.blockid,'|','TMS')), (
+       CASE
+              WHEN (
+                            t.state='P'
+                     AND    msgstate IN ('E',
+                                         'X')) THEN 'BACKOFFICE FAILED'
+              WHEN (
+                            t.state='P'
+                     AND    msgstate='S') THEN 'PENDING BACKOFFICE ACK'
+              WHEN (
+                            ms gstate ='W') THEN 'WARNING'
+              WHEN (
+                            msgstate ='C') THEN 'PROCESSED'
+              WHEN (
+                            t.state='U') THEN 'ERROR'
+              WHEN (
+                            t.status='B') the n 'BYPASSED'
+              WHEN (
+                            t.state='A'
+                     AND    t.status NOT IN ('D',
+                                             'B')) THEN 'PENDING APPROVAL'
+              ELSE''
+       END) AS stat
+FROM   #alloc a,
+       tbltrade t,
+       tbltmsmsg tms
+WHERE  t.blockid=a.blockid
+AND    t.type IN ('AAL')
+AND    t.active='A'
+AND    t.tradeid=tms.tradeid
+AND    t.tradever=tms.tradever
+AND    ( (
+                     t.tradedate>=@startTradeDate
+              AND    t.tradedate <= @toTradeDate)
+       OR     (
+                     t.moddt>=@fromDate
+              AND    t.moddt<=@toDate)
+       OR     (
+                     tms.auditdate>=@fromDate
+              AND    tms.auditdate<=@toDate))
+AND    (
+              @ category='EXCEPTIONS'
+       AND    ( ( (
+                                   t.state='U'
+                            OR     (
+                                          t.state ='P'
+                                   AND    tms.msgstate IN ('E',
+                                                           'X',
+                                                           'W')) ) )
+              OR     ( (
+                                   t.fileid<0
+                            OR     (
+                                          t.fileid > 0
+                                   AND    datediff(minute,t.moddt,getdate())>10))
+                     AND    (
+                                   tms.msgstate IN ('S')) ) )
+       OR     (
+                     @category = 'PROCESSED'
+              AND    t.status IN ('A',
+                                  'M',
+                                  'X')
+              AND    tms.msgstate = 'C')
+              --or (@category = 'APPROVALS' and (t.state = 'A' and t.status not in ('D','B')) )
+       OR     (
+                     @category = 'OTHER'
+              AND    t.status = 'B'
+              AND    tms.msgstate = 'B' )
+       OR     (
+                     @category = 'ALL'
+              AND    ( ( (
+                                          t.state='U'
+                                   OR     (
+                                                 t.state ='P'
+                                          AND    tms.msgstate IN ('E',
+                                                                  'W',
+                                                                  'X')))
+                            OR     ( (
+                                                 t.fileid<0
+                                          OR     (
+                                                        t. fileid > 0
+                                                 AND    datediff(minute,t.moddt,getdate())>10))
+                                   AND    tms.msgstate IN ('S') ) )
+                     OR     (
+                                   t.status IN ('A',
+                                                'M',
+                                                'X')
+                            AND    tms.msgstate = 'C' )
+                     OR     (
+                                   t.status = 'B'
+                            AND    tms.msgstate = 'B' ) ) ) ) u nion
+SELECT t.blockid,
+       t.tradeid,
+       t.tradever,
+       '',
+       t.type,
+       '' AS errormessage, (
+       CASE
+              WHEN (
+                            t.state='U ') THEN 'ERROR'
+              WHEN (
+                            t.status='B') THEN 'BYPASSED'
+              WHEN (
+                            t.state='A'
+                     AND    t.status NOT IN ('D',
+                                             'B')) THEN 'PENDING APPROVAL'
+              ELSE''
+       END) AS stat
+FROM   #alloc a,
+       tbltrade t
+WHERE  t.blockid=a.blockid
+AND    t.type IN ('OAL',
+                  'AAL')
+AND    t.active='A'
+AND    ( (
+                     t.tradedate>=@startTradeDate
+              AND    t.tradedate <= @toTradeDate)
+       OR     (
+                     t.moddt>=@fromDate
+              AND    t.moddt<=@toDate) )
+AND    ( (
+                     @category = 'APPROVALS'
+              AND    (
+                            t.state = 'A'
+                     AND    t.status NOT IN ('D',
+                                             'B')) )
+       OR     (
+                     @ca tegory = 'ALL'
+              AND    (
+                            t.state = 'A'
+                     AND    t.status NOT IN ('D',
+                                             'B')) ) )
+SET ROWCOUNT @totalRecords
+SELECT DISTINCT count(DISTINCT t.t opacct)    numofexceptions ,
+                0                          AS numallocations ,
+                sum(t.quantity)            AS quantity ,
+                sum(isnull(t.bondint,0))   AS accruedinterest ,
+                sum(t.commission)          AS gcommission ,
+                sum(t.netamount)           AS netamount ,
+                sum(t.bondprin)            AS princ ipal ,
+                t.blockid                  AS blockid,
+                max(t.moddt)               AS modifieddate ,
+                t.topacct ,
+                t.secid                                                               AS symbol ,
+                pbonline.dbo.f_getsecmastinfo(t.secid,t.cusip,t.symtyp,'Description') AS securitydescription ,
+                t.exbroker                                                            AS execbrokerc ode,
+                ''                                                                    AS execbrokermnemonic ,(
+                CASE
+                                WHEN status='A' THEN 'ENTER'
+                                WHEN status='M' THEN 'AMEND'
+                                WHEN status='X' THEN 'CANCEL'
+                                WHEN status='B' THEN 'BYPASS'
+                                WHEN status='D' THEN 'BLOCKED'
+                                WHEN status='N' THEN 'ERROR'
+                                ELSE ''
+                END) AS action ,
+                t .price ,
+                'Equity'                                                                    AS assettype ,
+                pbonline.dbo.f_getsecmastinfo(t.secid,t.cusip,t.symtyp,'tradeCurrencyCode') AS tradecurrencycode ,
+                t.currcode                                                                  AS settlementcurrencycode ,
+                isnull(
+                (
+                       SELECT displaytext
+                       FROM   transactiontyp elookup
+                       WHERE  buysell=t.buysell),t.buysell) AS transactiontype,
+                t.commcode                                     commissioncode ,
+                t.cusip,(
+                CASE
+                                WHEN t.secid LIKE 'SEDOL%' THEN str_replace(t.secid,'SEDOL','')
+                                ELSE ''
+                END)      AS                                    sedol ,
+                t.bondind AS                                    bondfactor ,
+                CONVERT(date,ca st(t.tradedate AS char),121) AS tradedate,
+                CONVERT(date,cast(t.settledate AS char),121) AS settleddate ,(
+                CASE
+                                WHEN (
+                                                                t.type='AAL'
+                                                OR              t.type='AHD') THEN 'ICGMI'
+                                WHEN (
+                                                                t.type='OAL'
+                                                OR              t.type='OHD') THEN 'CGML'
+                                ELSE NULL
+                END) AS entity ,
+                stat AS status ,
+                0    AS tradestatus ,
+                errormessage
+                /*      ,(Case when (t.type='AAL' or t.type='AHD' ) then
+(select dbo.f_getErrorMessages(t.tradeId,t.tradeVer,'|','TMS'))
+when (t.type='OAL' or t.type='OHD' ) then
+(select dbo.f_getErrorMessages(t.tradeId,t.tradeVer,'|','IPB')) end ) as errorMessage */
+                ,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppassig nedTo',t.blockid,'|')) AS trdappassignedto,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppAction',t.blockid,'|')) AS trdappaction,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppComments',t.blockid,'|')) AS trdappcomments,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppassignedBy',t.blockid,'|')) AS trdappassignedby,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppActionDate',t.blockid,'|')) AS trdappactiondate,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppActionB y',t.blockid,'|')) AS trdappactionby,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('trdAppassignedDate',t.blockid,'|')) AS trdappassigneddate,
+                (
+                       SELECT dbo.f_getcontradeapprovalstatus('ALL',t.blockid,'|')) AS trdapprovalstatus,
+                --c
+                lienttraderef AS clientrefid 'TO DO' AS clientrefid
+                --,i.tradeId as tradeId--,'' as baseId
+FROM            pbprebook.dbo.tbltrade t noholdlock,
+                #inter i
+WHERE           t.type IN ('AAL',
+                           'OAL')
+AND             t.blocki d=i.blockid
+AND             t.active='A'
+AND             i.tradeid=t.tradeid
+AND             i.tradever=t.tradever
+GROUP BY        t.blockid,
+                t.type,
+                t.topacct,
+                t.secid,
+                t.exbroker,
+                t.clrbroker,
+                t.state,
+                t.price,
+                t.currcode,
+                t.buysell,
+                t.commcode,
+                t.cusip,
+                t.bondind,
+                t.tradedate,
+                t.settledate,
+                t.symtyp,
+                t.status,
+                t.active,
+                stat,
+                errormessage
+                --,clientTradeRef
+ORDER BY        t.tradedate DESC
+SET ROWCOUNT 0
+EXEC sp_procxmode
+  gettradestemp,
+  unchained 
