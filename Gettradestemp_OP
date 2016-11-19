@@ -1,0 +1,636 @@
+ CREATE PROCEDURE [dbo].[Gettradestemp]
+  -- Add the parameters for the stored procedure here  
+  @category           VARCHAR(25),-- ALL/Exceptions/Approvals/Processed/Other  
+  @assetType          VARCHAR(25),-- ALL/Equity/FI
+  @settlementCurrency VARCHAR(25),-- Settlement Currency
+  @fromDate           VARCHAR(50),
+  @toDate             VARCHAR(50),
+  @searchText         VARCHAR(100),
+  @topAccount         VARCHAR(25),
+  @sortOrder          VARCHAR(50),
+  @sortDirection      VARCHAR(5),
+  @pageNo             INT,
+  @totalTradesPerPage INT,
+  @debug              VARCHAR(1) = 'N'
+AS
+    DECLARE @query VARCHAR(max);
+    DECLARE @paramDefinition VARCHAR(200);
+    DECLARE @topRowCount INT;
+    DECLARE @startTradeDate DATETIME;
+    DECLARE @toTradeDate DATETIME;
+    DECLARE @status1 VARCHAR(100);
+    DECLARE @status2 VARCHAR(100);
+    DECLARE @status3 VARCHAR(100);
+    DECLARE @downStreamStatus1 VARCHAR(100);
+    DECLARE @downStreamStatus2 VARCHAR(100);
+    DECLARE @tradeOrigSystem VARCHAR(100);
+    DECLARE @waitingMinute INT;
+    DECLARE @excludeBlockId INT;
+    DECLARE @searchTextOrig VARCHAR(max);
+    DECLARE @systemStatus1 VARCHAR(32);
+
+  BEGIN
+      SET @searchTextOrig = Upper(@searchText);
+      SET @startTradeDate = Cast(@fromDate AS DATETIME);
+      SET @toTradeDate = Dateadd(day, 1, Cast(@toDate AS DATETIME));
+      SET @topRowCount = ( @pageNo + 2 ) * @totalTradesPerPage;
+
+      IF @category = 'Exceptions'
+        BEGIN
+            SET @status1 = 'ISSUE,REJECTED' --or (
+            SET @status2 = 'ACTIVE' --and ( 
+            SET @downStreamStatus1 = 'FAILED,WARNING' -- or (
+            SET @downStreamStatus2 = 'PENDING' -- and
+            SET @tradeOrigSystem = 'oprouter' -- and 
+            SET @waitingMinute = 10 -- ) ) )
+            SET @status3 = 'ISSUE,ACTIVE,APPROVAL_REQUIRED,REJECTED'
+            SET @excludeBlockId = 0
+            SET @systemStatus1 = 'ACK_RECEIVED'
+        END
+      ELSE IF @category = 'Approvals'
+        BEGIN
+            SET @status1 = 'APPROVAL_REQUIRED'
+            SET @status2 = 'N/A'
+            SET @downStreamStatus1 = 'N/A'
+            SET @downStreamStatus2 = 'N/A'
+            SET @tradeOrigSystem = 'N/A'
+            SET @waitingMinute = 0
+            SET @status3 = 'ISSUE,ACTIVE,APPROVAL_REQUIRED'
+            SET @excludeBlockId = 0
+            SET @systemStatus1 = 'N/A'
+        END
+      ELSE IF @category = 'Processed'
+        BEGIN
+            SET @status1 = 'N/A'
+            SET @status2 = 'ACTIVE'
+            SET @downStreamStatus1 = 'COMPLETE'
+            SET @downStreamStatus2 = 'N/A'
+            SET @tradeOrigSystem = 'N/A'
+            SET @waitingMinute = 0
+            SET @status3 = 'ISSUE,ACTIVE,APPROVAL_REQUIRED'
+            SET @excludeBlockId = 0
+            SET @systemStatus1 = 'N/A'
+        END
+      ELSE IF @category = 'Other'
+        BEGIN
+            SET @status1 = 'BYPASSED,REJECTED'
+            SET @status2 = 'N/A'
+            SET @downStreamStatus1 = 'N/A'
+            SET @downStreamStatus2 = 'N/A'
+            SET @tradeOrigSystem = 'N/A'
+            SET @waitingMinute = 0
+            SET @status3 = 'ISSUE,ACTIVE,APPROVAL_REQUIRED,BYPASSED,REJECTED'
+            SET @excludeBlockId = -99999
+            SET @systemStatus1 = 'N/A'
+        END
+      ELSE IF @category = 'ALL'
+          OR @category = 'All'
+        BEGIN
+            SET @status1 = 'ACTIVE,ISSUE,APPROVAL_REQUIRED,BYPASSED,REJECTED'
+            SET @status2 = 'ACTIVE'
+            SET @downStreamStatus1 = 'FAILED,WARNING,COMPLETE'
+            SET @downStreamStatus2 = 'PENDING'
+            SET @tradeOrigSystem = 'oprouter'
+            SET @waitingMinute = 10
+            SET @status3 = 'ISSUE,ACTIVE,APPROVAL_REQUIRED,BYPASSED,REJECTED'
+            SET @excludeBlockId = -99999
+            SET @systemStatus1 = 'N/A'
+        END
+
+      -------------Fetching blockIds which match the filter criteria and storing in temporary table---------------    
+      CREATE TABLE #tradesummary
+        (
+           blockid   INT,
+           rownum    INT,
+           action    INT,
+           minstatus INT
+        )
+
+      IF @searchText != ''
+        SET @searchText = '%' + Upper(@searchText) + '%';
+
+      INSERT INTO #tradesummary
+                  (blockid,
+                   rownum,
+                   action)
+      SELECT TOP(@topRowCount) tfinal.blockid,
+                               Min(tfinal.rownum),
+                               Min(tfinal.action)
+      FROM   (SELECT DISTINCT blockid,
+                              ( CASE
+                                  WHEN @sortOrder = 'tradeDate'
+                                       AND @sortDirection = 'DESC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.tradedate DESC)
+                                  WHEN @sortOrder = 'tradeDate'
+                                       AND @sortDirection = 'ASC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.tradedate ASC)
+                                  WHEN @sortOrder = 'modifiedDate'
+                                       AND @sortDirection = 'DESC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.modifieddate DESC)
+                                  WHEN @sortOrder = 'modifedDate'
+                                       AND @sortDirection = 'ASC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.modifieddate ASC)
+                                  WHEN @sortOrder = 'settledDate'
+                                       AND @sortDirection = 'DESC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.valuedate DESC)
+                                  WHEN @sortOrder = 'settledDate'
+                                       AND @sortDirection = 'ASC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.valuedate ASC)
+                                  WHEN @sortOrder = 'securityDescription'
+                                       AND @sortDirection = 'DESC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.securitycode DESC)
+                                  WHEN @sortOrder = 'securityDescription'
+                                       AND @sortDirection = 'ASC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.securitycode ASC)
+                                  WHEN @sortOrder = 'client'
+                                       AND @sortDirection = 'DESC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.topacct DESC)
+                                  WHEN @sortOrder = 'client'
+                                       AND @sortDirection = 'ASC' THEN
+                                  Row_number()
+                                  OVER (
+                                    ORDER BY t.topacct ASC)
+                                  WHEN @sortOrder = 'broker'
+                                       AND @sortDirection = 'DESC' THEN
+                                  Row_number()
+             OVER (
+               ORDER BY Isnull(t.execbrokermnemonic, t.execbrokercode)
+             DESC)
+             WHEN @sortOrder = 'broker'
+                  AND @sortDirection = 'ASC' THEN Row_number()
+             OVER (
+               ORDER BY Isnull(t.execbrokermnemonic, t.execbrokercode)
+             DESC)
+             WHEN @sortOrder = 'price'
+                  AND @sortDirection = 'DESC' THEN Row_number()
+             OVER (
+               ORDER BY t.price DESC)
+             WHEN @sortOrder = 'price'
+                  AND @sortDirection = 'ASC' THEN Row_number()
+             OVER (
+               ORDER BY t.price ASC)
+                                END ) AS rowNum,
+                              ( CASE
+                                  WHEN t.action = 'AMEND' THEN 1
+                                  WHEN t.action = 'ENTER' THEN 2
+                                  WHEN t.action = 'CANCEL' THEN 3
+                                  ELSE 99
+                                END ) AS action
+              FROM   dbo.trade (nolock) t
+                     LEFT OUTER JOIN dbo.tradestatus (nolock) ts
+                                  ON t.id = ts.tradeid
+                                     AND ts.system IN ( 'TML', 'TPS', 'FWS' )
+              WHERE  ( ( t.modifieddate >= @startTradeDate
+                         AND t.modifieddate <= @toTradeDate )
+                        OR ( tradedate >= @startTradeDate
+                             AND tradedate <= @toTradeDate ) )
+                     AND blockid != @excludeBlockId
+                     AND ( topacct IS NULL
+                            OR topacct IN ( CASE
+                                              WHEN @topAccount LIKE '%ALL%' THEN
+                                              topacct
+                                              ELSE (SELECT value
+                                                    FROM   Gettablefromstring_fn
+                                                           (
+                                                           @topAccount,
+                                                           ','))
+                                            END ) )
+                     AND (( status IN (SELECT value
+                                       FROM   Gettablefromstring_fn(@status1,
+                                              ',')
+                                      )
+                             OR ( status IN (SELECT value
+                                             FROM   Gettablefromstring_fn(
+                                                    @status2
+                                                    ,
+                                                    ','))
+                                  AND (
+                                      /* DOWN STREAM SYSTEM IN FAIL FOR EXCEPTIONS*/
+                                      downstreamstatus IN (SELECT value
+                                                           FROM
+                                      Gettablefromstring_fn(@downStreamStatus1
+                                      ,
+                                      ',')
+                                                          )
+                                       OR ( /*PENDING TRADES CONDITIONS*/
+                                          downstreamstatus IN (SELECT value
+                                                               FROM
+                                          Gettablefromstring_fn(
+                                          @downStreamStatus2
+                                          ,
+                                          ','))
+                                          AND tradeoriginatingsystem IN (SELECT
+                                              value
+                                                                         FROM
+                                              Gettablefromstring_fn(
+                                              @tradeOrigSystem
+                                              ,
+                                              ','))
+                                          AND
+             Datediff(minute, Getdate(), t.modifieddate) > @waitingMinute
+                     AND ( ts.systemstatus NOT IN (SELECT value
+                                                   FROM
+                           Gettablefromstring_fn(@systemStatus1,
+                           ','))
+                         )--new code
+                      ) ) ) ))
+             AND transactiontype IN ( 'SEL', 'BUY', 'BCI', 'SSI',
+                         'RVTM', 'RPTM', 'RVDD', 'RPDD' )
+             AND product = ( CASE
+                  WHEN ( @assetType LIKE '%ALL%'
+                          OR ( @assetType LIKE '%FI%'
+                               AND product LIKE 'FI_%' )
+                          OR ( @assetType LIKE '%Equity%'
+                               AND product NOT LIKE 'FI_%' ) ) THEN product
+                  ELSE 'XYZ'
+                END )
+             --and product in ('SECURITY','FX')
+             AND ( ( @settlementCurrency LIKE '%ALL%'
+             AND settlementcurrencycode IS NULL )
+             OR ( settlementcurrencycode = ( CASE
+                                         WHEN @settlementCurrency LIKE '%ALL%'
+                                       THEN
+                                         settlementcurrencycode
+                                         WHEN
+             @settlementCurrency LIKE '%NON-USD%'
+                                       THEN (
+                                         CASE
+                                           WHEN
+                                         settlementcurrencycode = 'USD' THEN
+                                           NULL
+                                         ELSE
+                                         settlementcurrencycode
+                                         END )
+                                         ELSE settlementcurrencycode
+                                       END ) ) )
+             AND ( @searchText = ''
+             OR Upper(topacct) LIKE @searchText
+             OR blockid LIKE @searchText
+             OR Upper(externalid) LIKE @searchText
+             OR Upper(securitycode) LIKE @searchText
+             OR Upper(cusip) LIKE @searchText
+             OR Upper(sedol) LIKE @searchText
+             OR Upper(execbrokermnemonic) LIKE @searchText
+             OR Upper(execbrokercode) LIKE @searchText
+             OR quantity LIKE @searchText
+             OR price LIKE @searchText
+             OR Upper(account) LIKE @searchText ))tfinal
+      GROUP  BY tfinal.blockid;
+
+      UPDATE #tradesummary
+      SET    minstatus = (SELECT Min(CASE
+                                       WHEN ( t.status = 'ISSUE' ) THEN 1
+                                       WHEN
+                                 ( t.status = 'ACTIVE'
+                                   AND t.downstreamstatus = 'FAILED' )
+                                     THEN
+                                       2
+                                       WHEN
+                                 ( t.status = 'ACTIVE'
+                                   AND t.downstreamstatus = 'PENDING' )
+                                     THEN 3
+                                       WHEN ( status = 'APPROVAL_REQUIRED' )
+                                     THEN
+                                       4
+                                       WHEN
+                                 ( status = 'ACTIVE'
+                                   AND t.downstreamstatus = 'COMPLETE' )
+                                     THEN 5
+                                       ELSE 99
+                                     END)
+                          FROM   dbo.trade (nolock) t
+                          WHERE  t.blockid = #tradesummary.blockid);
+
+      IF @category = 'Approvals'
+        DELETE FROM dbo.#tradesummary
+        WHERE  minstatus != 4;
+
+      IF @category = 'Processed'
+        DELETE FROM dbo.#tradesummary
+        WHERE  minstatus != 5;
+
+      IF @debug = 'Y'
+        BEGIN
+            SELECT *
+            FROM   #tradesummary
+            ORDER  BY rownum
+        END
+
+      --------------------Deleting the blockIds which version and status not matching as max version -------------
+      IF @category = 'Other'
+        DELETE FROM #tradesummary
+        WHERE  NOT EXISTS (SELECT blockid
+                           FROM   dbo.trade t
+                           WHERE  t.blockid = #tradesummary.blockid
+                                  AND t.version = #tradesummary.maxversion
+                                  AND t.status IN ( @status1 ));
+
+      ----------------Fetching all fields joining with temporary table----------------------------------------------
+      SELECT ( CASE
+                 WHEN ts.settleddate <= Cast(Getdate() AS DATE) THEN 'true'
+                 ELSE 'false'
+               END ) AS settlementDateToday,
+             ( CASE
+                 WHEN ts.commissioncode = 'G' THEN gcommission
+                 ELSE gcommission / numofallocations
+               END ) AS commission,
+             ts.*,
+             0       AS numOfExceptions
+      FROM   (SELECT t1.rownum,
+                     Sum(Isnull(t.quantity, 0))
+                            AS quantity,
+                     Sum(Isnull(t.interest, 0))
+                            AS accruedInterest,
+                     Sum(t.commission)
+                            AS gCommission,
+                     Count(*)
+                            AS numOfAllocations,
+                     Sum(Isnull(t.finalnetamount, CASE
+                                                    WHEN (
+                         t.isnetamountprefigured = 'Y'
+                          OR t.transactiontype IN (
+                             'TFO', 'TFI', 'DVP', 'RVP' ) )
+                                                  THEN
+                                                    t.netamount
+                                                    ELSE 0
+                                                  END))
+                            AS netAmount,
+                     Sum(Isnull(t.finalprincipal, CASE
+                                                    WHEN (
+                         t.downstreamstatus = 'COMPLETE'
+                          OR t.isprincipalprefigured = 'Y'
+                          OR t.productgroup = 'BOND' ) THEN
+                                                    t.principal
+                                                    ELSE 0
+                                                  END))
+                            AS principal,
+                     t.blockid,
+                     Max(t.modifieddate)
+                            AS modifiedDate,
+                     --(case when t.product like 'FI_%' then t.account else t.topAcct end) as topAcct,        
+                     t.topacct,
+                     t.securitycode
+                            AS symbol,
+                     t.securitydescription,
+                     t.execbrokermnemonic,
+                     t.execbrokercode,
+                     Isnull(t.execbrokermnemonic, t.execbrokercode)
+                            AS execBroker,
+                     t.price,
+                     ( CASE
+                         WHEN t.product LIKE 'FI_%' THEN 'FI'
+                         ELSE 'Equity'
+                       END )
+                            AS assetType,
+                     t.product,
+                     t.productgroup,
+                     ( CASE
+                         WHEN t1.action = 1 THEN 'AMEND'
+                         WHEN t1.action = 2 THEN 'ENTER'
+                         WHEN t1.action = 3 THEN 'CANCEL'
+                         ELSE ''
+                       END )
+                            AS action,
+                     t.tradecurrencycode,
+                     t.settlementcurrencycode,
+                     Isnull((SELECT TOP 1 displaytext
+                             FROM   transactiontypelookup
+                             WHERE  transactiontype = t.transactiontype
+                                    AND product = t.product
+                                    AND ( t.inhouseind IS NULL
+                                           OR inhouseind = t.inhouseind )),
+                            t.transactiontype) AS
+                     transactionType,
+                     t.commissioncode,
+                     t.cusip,
+                     t.sedol,
+                     t.bondfactor,
+                     Cast (t.tradedate AS DATE)
+                            AS tradeDate,
+                     Cast (t.valuedate AS DATE)
+                            AS settledDate,
+                     t.legalentity
+                            AS entity,
+                     ( CASE
+                         WHEN t.product LIKE 'FI_REPO' THEN 'FWS'
+                         WHEN ( t.product = 'FI_SECURITY'
+                                 OR t.product = 'FI_FX_FIRM'
+                                 OR t.product = 'FI_FX_AWAY' ) THEN 'TPS'
+                         ELSE 'TML'
+                       END )
+                            AS system,
+                     ( CASE
+                         WHEN ( t1.minstatus = 1 ) THEN 'ERROR'
+                         WHEN ( t1.minstatus = 2 ) THEN 'BACKOFFICE FAILED'
+                         WHEN ( t1.minstatus = 3 ) THEN 'PENDING BACKOFFICE ACK'
+                         WHEN ( t1.minstatus = 4 ) THEN 'PENDING APPROVAL'
+                         WHEN ( t1.minstatus = 5 ) THEN 'PROCESSED'
+                         ELSE status
+                       END )
+                            AS status,
+                     0
+                            AS tradeStatus,
+                     Stuff((SELECT '###' + ts.errormessage
+                            FROM   (SELECT DISTINCT tn.errormessage
+                                    FROM   (SELECT
+                                   Isnull(tm.errormessage, '') + '|'
+                                   + Isnull(bm.businessmessage, '') + '|'
+                                   + Isnull(bm.resolution, '') AS
+                                   errorMessage
+                                            FROM   (SELECT DISTINCT
+                                                    errormessage,
+                                                    'Optimus' AS system
+                                                    FROM   dbo.tradeexceptions (
+                                                           nolock
+                                                           )
+                                                    WHERE  tradeid IN (SELECT id
+                                                                       FROM
+                                                           dbo.trade (nolock)
+                                                                       WHERE
+                                                           blockid = t.blockid
+                                                           AND active = 'Y'
+                                                                      --and headerAllocInd = 'ALLOC'          
+                                                                      )
+                                                    UNION
+                                                    SELECT DISTINCT
+                                                    errormsg AS errorMessage,
+                                                    system
+                                                    FROM   dbo.tradestatus (
+                                                           nolock
+                                                           )
+                                                    WHERE  tradeid IN (SELECT id
+                                                                       FROM
+                                                           dbo.trade (nolock)
+                                                                       WHERE
+                                                           blockid = t.blockid
+                                                           AND status IN (
+                                                               'ACTIVE' )
+                                                           AND headerallocind =
+                                                               'ALLOC')
+                                                           AND system IN ( 'TML'
+                                                               ,
+                                                               'TPS',
+                                                                           'FWS'
+                                                               )
+                                                   )tm
+                                   LEFT JOIN dbo.businessmsgmapping bm
+                                          ON
+                                   tm.system = bm.destination
+                                   AND tm.errormessage LIKE
+                                           bm.systemerror)tn) ts
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            errorMessage,
+                     --Code added to concatenate date from TradeApprovalStatus for the selected blockId
+                     Stuff((SELECT '|' + trdappassignedto
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppassignedTo,
+                     Stuff((SELECT '|' + trdappaction
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppAction,
+                     Stuff((SELECT '|' + trdappcomments
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppComments,
+                     Stuff((SELECT '|' + trdappassignedby
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppassignedBy,
+                     Stuff((SELECT '|'
+                                   + CONVERT(VARCHAR(19), trdappactiondate, 20)
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppActionDate,
+                     Stuff((SELECT '|' + trdappactionby
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppActionBy,
+                     Stuff((SELECT '|'
+                                   + CONVERT(VARCHAR(19), trdappassigneddate, 20
+                                   )
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdAppAssignedDate,
+                     --To be commented above code and uncomment below one later
+                     Stuff((SELECT + '|' + trdappassignedto + '|' + trdappaction
+                                   +
+                                   '|'
+                                    + trdappcomments + '|' + trdappassignedby +
+                                   '|'
+                                    + Isnull(CONVERT(VARCHAR(19),
+                                   trdappactiondate
+                                   , 20
+                                   ), '')
+                                    + '|' + Isnull(trdappactionby, '') + '|'
+                                    + CONVERT(VARCHAR(19), trdappassigneddate,
+                                   20)
+                                    + '##'
+                            FROM   dbo.tradeapprovalstatus
+                            WHERE  blockid = t.blockid
+                            FOR xml path(''), type).value('.', 'NVARCHAR(MAX)'),
+                     1
+                     , 1,
+                     '')
+                            AS
+                     trdApprovalStatus,
+                     externalid
+                            AS clientRefId
+              FROM   dbo.trade t,
+                     (SELECT blockid,
+                             minstatus,
+                             action,
+                             rownum
+                      FROM   #tradesummary)t1
+              WHERE  t.blockid = t1.blockid
+                     AND t.status IN (SELECT value
+                                      FROM   Gettablefromstring_fn(@status3, ','
+                                             ))
+                     AND t.headerallocind = 'ALLOC'
+                     AND t.blockid != @excludeBlockId
+              GROUP  BY t1.rownum,
+                        t1.minstatus,
+                        t.blockid,
+                        t.topacct,
+                        t1.action,
+                        t.securitycode,
+                        t.securitydescription,
+                        t.execbrokermnemonic,
+                        t.execbrokercode,
+                        t.inhouseind,
+                        t.price,
+                        t.product,
+                        t.productgroup,
+                        t.tradecurrencycode,
+                        t.settlementcurrencycode,
+                        t.transactiontype,
+                        t.commissioncode,
+                        t.cusip,
+                        t.sedol,
+                        t.downstreamstatus,
+                        t.bondfactor,
+                        t.legalentity,
+                        t.tradedate,
+                        t.valuedate,
+                        t.status,
+                        externalid) ts
+      ORDER  BY ts.rownum
+  END
+
+    GRANT EXECUTE ON [dbo].[GetTradesTemp] TO [optimus_srv] WITH GRANT OPTION  
